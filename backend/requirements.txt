@@ -1,0 +1,53 @@
+
+#LANGCHAIN FRAMEWORK
+langchain             #Framework for building LLM powered agents, tools and workflows
+langchain-core
+langchain-community        #provides  hundereds of prebuilt loaders (pyPDFLoader,WebBaseLoader, CSVLoader), community integrations
+langchain-openai           #connect openai models
+langchain-ollama           #connect local running Ollama models
+langchain-text-splitters   #split documents into smaller chunks
+langchain-postgres
+#LLM PROVIDERS & Tokenization
+openai
+ollama
+tiktoken   #Fast BPE(Byte-pair-Encoding) tokenizer developed by openai to convert text into token IDs, count tokens and estimate API usage pr context limits.
+
+#Backend / Restapi
+fastapi    # web frame work builds
+uvicorn[standard]
+pydantic>=2.0
+
+#vector database and embeddings
+chromadb
+langchain-chroma
+sentence-transformers  #Generates embeddings for senstences, textt, and documnets.
+
+#Agentic AI/Langgraph
+langgraph
+langgraph-checkpoint
+
+#document processing & file extraction
+pypdf
+pymupdf
+requests
+python-docx
+openpyxl
+python-pptx
+pdfplumber
+
+
+#asynchrous & HTTP requests
+aiohttp
+aiofiles
+requests
+typing-extensions
+asyncio
+
+#mcp & fast mcp
+mcp
+fastmcp
+
+#testing
+pytest
+pytest-asyncio
+httpx
