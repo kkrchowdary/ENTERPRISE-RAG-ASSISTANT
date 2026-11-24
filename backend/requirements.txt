@@ -1,59 +1,23 @@
 
-#LANGCHAIN FRAMEWORK
-langchain             #Framework for building LLM powered agents, tools and workflows
-langchain-core
-langchain-community        #provides  hundereds of prebuilt loaders (pyPDFLoader,WebBaseLoader, CSVLoader), community integrations
-langchain-unstructured
-langchain-openai           #connect openai models
-langchain-ollama           #connect local running Ollama models
-langchain-text-splitters   #split documents into smaller chunks
-langchain-postgres
-langchain[mcp]
-langgraph
-
-#LLM PROVIDERS & Tokenization
-openai
-ollama
-tiktoken   #Fast BPE(Byte-pair-Encoding) tokenizer developed by openai to convert text into token IDs, count tokens and estimate API usage pr context limits.
-
-#Backend / Restapi
-fastapi    # web frame work builds
+fastapi
 uvicorn[standard]
-pydantic>=2.0
-
-#vector database and embeddings
-chromadb
+pydantic>=2,<3
+pydantic-settings
+python-multipart
+langchain>=1,<2
+langchain-community
+langchain-ollama
 langchain-chroma
-sentence-transformers  #Generates embeddings for senstences, textt, and documnets.
-
-#Agentic AI/Langgraph
-langgraph
-langgraph-checkpoint
-
-#document processing & file extraction
-pypdf
-pymupdf
-requests
-python-docx>=1.1
-openpyxl
-python-pptx
+langchain-huggingface
+langchain-text-splitters
+langgraph>=1,<2
+sentence-transformers
+transformers
 pdfplumber
+docx2txt
+python-docx>=1.1
+unstructured[md,pptx,xlsx]
 xlrd
-unstructured[all]
-
-
-#asynchrous & HTTP requests
-aiohttp
-aiofiles
-requests
-typing-extensions
-asyncio
-
-#mcp & fast mcp
-mcp
-fastmcp
-
-#testing
 pytest
 pytest-asyncio
 httpx

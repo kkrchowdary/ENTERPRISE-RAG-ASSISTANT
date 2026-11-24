@@ -11,6 +11,7 @@ from langchain_community.document_loaders import (
     Docx2txtLoader,  
 )  
 import pdfplumber  
+import xlrd
 
   
   
@@ -32,6 +33,24 @@ class PDFPlumberLoader:
         return docs  
   
   
+class XLSLoader:
+    def __init__(self, file_path: str):
+        self.file_path = file_path
+
+    def load(self) -> List[Document]:
+        workbook = xlrd.open_workbook(self.file_path)
+        return [
+            Document(
+                page_content="\n".join(
+                    "\t".join(str(value) for value in sheet.row_values(row))
+                    for row in range(sheet.nrows)
+                ),
+                metadata={"source": self.file_path},
+            )
+            for sheet in workbook.sheets()
+        ]
+
+
 class LoaderOrchestrator:  
     """Registry that maps file extensions to LangChain loaders."""  
   
@@ -43,7 +62,7 @@ class LoaderOrchestrator:
             "csv": CSVLoader,  
             "pptx": UnstructuredPowerPointLoader,  
             "xlsx": UnstructuredExcelLoader,  
-            "xls": UnstructuredExcelLoader,  
+            "xls": XLSLoader,
             "docx": Docx2txtLoader,  
         }  
   
