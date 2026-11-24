@@ -7,6 +7,7 @@ openai
 uvicorn[standard]
 pydantic>=2,<3
 pydantic-settings
+python-dotenv
 python-multipart
 langchain>=1,<2
 langchain-core>=1,<2

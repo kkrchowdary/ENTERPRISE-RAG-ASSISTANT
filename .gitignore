@@ -2,3 +2,4 @@
 .pytest_cache/
 __pycache__/
 loaded_documents.json
+loaded_documents-*.json

@@ -75,6 +75,7 @@ def test_standalone_loader_finds_backend_documents_without_overwriting(tmp_path)
     core.mkdir()
     (backend / "app" / "__init__.py").touch()
     (core / "__init__.py").touch()
+    (backend / ".env").write_text("")
     shutil.copyfile(source_backend / "app" / "rag" / "loaders.py", rag / "loaders.py")
     shutil.copyfile(source_backend / "app" / "core" / "config.py", core / "config.py")
     document_dir = backend / "data" / "documents"
@@ -94,6 +95,36 @@ def test_standalone_loader_finds_backend_documents_without_overwriting(tmp_path)
     generated = list(rag.glob("loaded_documents-*.json"))
     assert len(generated) == 1
     assert json.loads(generated[0].read_text(encoding="utf-8"))[0]["page_content"] == "example content"
+    configured = backend / "data" / "other"
+    configured.mkdir()
+    (configured / "other.txt").write_text("configured content")
+    (backend / ".env").write_text("DOCUMENTS_DIR=data/other\n")
+    result = subprocess.run(
+        [sys.executable, "loaders.py"], cwd=rag, env=env,
+        capture_output=True, text=True, check=True,
+    )
+    assert str(configured) in result.stdout
+    assert existing.read_text() == "existing output"
+    generated = list(rag.glob("loaded_documents-*.json"))
+    assert len(generated) == 2
+    assert {
+        json.loads(path.read_text(encoding="utf-8"))[0]["page_content"] for path in generated
+    } == {"example content", "configured content"}
+    override = backend / "data" / "override"
+    override.mkdir()
+    (override / "override.txt").write_text("environment content")
+    env["DOCUMENTS_DIR"] = str(override)
+    result = subprocess.run(
+        [sys.executable, "loaders.py"], cwd=rag, env=env,
+        capture_output=True, text=True, check=True,
+    )
+    assert str(override) in result.stdout
+    assert existing.read_text() == "existing output"
+    generated = list(rag.glob("loaded_documents-*.json"))
+    assert len(generated) == 3
+    assert {
+        json.loads(path.read_text(encoding="utf-8"))[0]["page_content"] for path in generated
+    } == {"example content", "configured content", "environment content"}
 
 
 def test_standalone_loader_reports_empty_and_missing_directory(tmp_path):

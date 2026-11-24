@@ -46,11 +46,13 @@ Recursive folder loading uses LangChain's `BaseLoader` interface and local
 file traversal; LangChain's `DirectoryLoader` is in the sunset community package.
 
 For a standalone extraction preview, run `py .\app\rag\loaders.py` from
-`backend`. It reads `DOCUMENTS_DIR` from the backend `.env` or environment
-(relative paths are resolved from `backend`) and reports the directory used.
+`backend`. It discovers the nearest `.env` above the script, including the
+backend `.env`; existing environment variables take precedence. `DOCUMENTS_DIR`
+relative paths are resolved from `backend`, and the directory used is reported.
 The output JSON is written in the current directory; an existing
 `loaded_documents.json` is preserved by writing a uniquely named file instead.
-No output file is created when there is no extractable text.
+The output contains extracted document text. No output file is created when
+there is no extractable text.
 
 For each document-search tool call, retrieval takes up to 20 pgvector cosine
 neighbors and up to 20 BM25 keyword matches. Reciprocal-rank fusion combines
