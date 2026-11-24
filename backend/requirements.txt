@@ -34,6 +34,8 @@ python-docx
 openpyxl
 python-pptx
 pdfplumber
+docx2txt
+unstructured[all]
 
 
 #asynchrous & HTTP requests
