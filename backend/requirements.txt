@@ -3,6 +3,7 @@
 langchain             #Framework for building LLM powered agents, tools and workflows
 langchain-core
 langchain-community        #provides  hundereds of prebuilt loaders (pyPDFLoader,WebBaseLoader, CSVLoader), community integrations
+langchain-unstructured
 langchain-openai           #connect openai models
 langchain-ollama           #connect local running Ollama models
 langchain-text-splitters   #split documents into smaller chunks
@@ -38,6 +39,7 @@ openpyxl
 python-pptx
 pdfplumber
 xlrd
+unstructured[all]
 
 
 #asynchrous & HTTP requests
