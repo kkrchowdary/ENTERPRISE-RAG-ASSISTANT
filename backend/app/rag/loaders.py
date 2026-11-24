@@ -1,10 +1,12 @@
 import csv
 import json
+from collections.abc import Iterator
 from pathlib import Path
 
 import docx2txt
 import pdfplumber
 import xlrd
+from langchain_core.document_loaders import BaseLoader
 from langchain_core.documents import Document
 
 
@@ -14,7 +16,7 @@ class TextLoader:
 
     def load(self) -> list[Document]:
         return [Document(page_content=Path(self.file_path).read_text(),
-                         metadata={"source": self.file_path})]
+                        metadata={"source": self.file_path})]
 
 
 class CSVLoader:
@@ -130,49 +132,68 @@ class LoaderOrchestrator:
         return loader_cls(file_path).load()  
   
     def load_directory(self, dir_path: str) -> list[Document]:
-        docs = []  
-        for path in Path(dir_path).rglob("*"):  
-            if path.suffix.lstrip(".").lower() in self.loaders:  
-                docs.extend(self.load_file(str(path)))  
-        return docs
+        return RecursiveDirectoryLoader(dir_path, self).load()
+
+
+class RecursiveDirectoryLoader(BaseLoader):
+    def __init__(self, directory: str | Path, orchestrator: LoaderOrchestrator | None = None):
+        self.directory = Path(directory)
+        self.orchestrator = orchestrator or LoaderOrchestrator()
+
+    def lazy_load(self) -> Iterator[Document]:
+        if not self.directory.is_dir():
+            raise FileNotFoundError(f"Document directory does not exist: {self.directory}")
+        for path in self.directory.rglob("*"):
+            if path.is_file() and path.suffix.lstrip(".").lower() in self.orchestrator.loaders:
+                yield from self.orchestrator.load_file(str(path))
 
 
 if __name__ == "__main__":
-    folder_path = r"C:\Users\kkrch\Local_project\ENTERPRISE-RAG-ASSISTANT\ENTERPRISE-RAG-ASSISTANT\backend\data\documents"  # Your input folder
-    output_file = "loaded_documents.json"
+    import sys
+    from uuid import uuid4
 
-    orchestrator = LoaderOrchestrator()
+    backend_dir = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(backend_dir))
+    from app.core.config import Settings
 
-    try:
-        documents = orchestrator.load_directory(folder_path)
+    folder_path = Settings().documents_dir
+    if not folder_path.is_absolute():
+        folder_path = backend_dir / folder_path
+    folder_path = folder_path.resolve()
+    print(f"Reading documents from: {folder_path}")
+    documents = LoaderOrchestrator().load_directory(str(folder_path))
+    print(f"\nSuccessfully loaded {len(documents)} documents.\n")
 
-        print(f"\nSuccessfully loaded {len(documents)} documents.\n")
+    if not documents:
+        print("No extractable documents found; no output file was created.")
+        sys.exit(0)
 
-        # Convert LangChain Documents into JSON-compatible dictionaries
-        data = [
-            {
-                "page_content": doc.page_content,
-                "metadata": doc.metadata
-            }
-            for doc in documents
-        ]
+    output_file = Path("loaded_documents.json")
+    if output_file.exists():
+        output_file = Path(f"loaded_documents-{uuid4().hex}.json")
 
-        # Save to JSON file
-        with open(output_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
+    # Convert LangChain Documents into JSON-compatible dictionaries
+    data = [
+        {
+            "page_content": doc.page_content,
+            "metadata": doc.metadata
+        }
+        for doc in documents
+    ]
 
-        print(f"Successfully saved documents to: {output_file}")
+    # Save to JSON file
+    with output_file.open("x", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
 
-        # Display preview
-        for i, doc in enumerate(documents, start=1):
-            print(f"\n{'=' * 60}")
-            print(f"Document {i}")
-            print(f"Source: {doc.metadata.get('source')}")
-            print(f"Page: {doc.metadata.get('page', 'N/A')}")
-            print(f"Content length: {len(doc.page_content)} characters")
-            print(f"\nContent Preview:\n")
-            print(doc.page_content[:500])
-            print(f"{'=' * 60}")
+    print(f"Successfully saved documents to: {output_file}")
 
-    except Exception as e:
-        print(f"Error loading documents: {e}")
+    # Display preview
+    for i, doc in enumerate(documents, start=1):
+        print(f"\n{'=' * 60}")
+        print(f"Document {i}")
+        print(f"Source: {doc.metadata.get('source')}")
+        print(f"Page: {doc.metadata.get('page', 'N/A')}")
+        print(f"Content length: {len(doc.page_content)} characters")
+        print("\nContent Preview:\n")
+        print(doc.page_content[:500])
+        print(f"{'=' * 60}")
