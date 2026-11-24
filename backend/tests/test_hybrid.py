@@ -11,8 +11,10 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.orm import selectinload
+from sqlalchemy.schema import CreateTable
 
 import app.agents.graph as graph_module
 import app.agents.tools as tools
@@ -22,7 +24,7 @@ import app.rag.retriever as retriever
 import app.rag.vector_store as vector_store
 from app.core.config import get_settings
 from app.database.connection import dispose_database, get_engine, get_session_factory, initialize_database
-from app.database.models import Chunk, Collection
+from app.database.models import Chunk, Collection, DocumentMetadata, StoredDocument
 from app.llm.embeddings import EmbeddingInputTooLong
 from app.main import app
 
@@ -93,7 +95,9 @@ def test_search_combines_pgvector_and_bm25(monkeypatch):
     result = asyncio.run(retriever.search("xy123"))
     assert {doc.metadata["source"] for doc in result} == {"lexical", "semantic"}
     assert "<=>" in statements[1]
-    assert "rag_chunk.embedding" not in statements[0]
+    assert "rag_chunk_v2.embedding" not in statements[0]
+    assert "JOIN rag_document" in statements[0]
+    assert "rag_document.collection_name" in statements[1]
 
 
 def test_reject_collection_with_different_embedding_model(monkeypatch):
@@ -120,8 +124,10 @@ def test_reject_collection_with_different_embedding_model(monkeypatch):
         asyncio.run(retriever.search("query"))
 
 
-def test_ingestion_stores_vectors_and_checks_collection_model(monkeypatch):
-    settings = SimpleNamespace(embeddings_model="model", collection_name="collection")
+def test_ingestion_stores_vectors_and_checks_collection_model(monkeypatch, tmp_path):
+    settings = SimpleNamespace(
+        embeddings_model="model", collection_name="collection", documents_dir=tmp_path
+    )
     saved = []
 
     class FakeEmbeddings:
@@ -151,20 +157,32 @@ def test_ingestion_stores_vectors_and_checks_collection_model(monkeypatch):
         async def scalar(self, statement):
             return self.model
 
-        def add_all(self, rows):
-            saved.extend(rows)
+        def add(self, row):
+            saved.append(row)
 
     monkeypatch.setattr(vector_store, "get_settings", lambda: settings)
     monkeypatch.setattr(vector_store, "get_embeddings", FakeEmbeddings)
     monkeypatch.setattr(vector_store, "get_session_factory", lambda: Session)
     doc = Document(page_content="content", metadata={"source": "file.txt"})
-    asyncio.run(vector_store.add_documents([doc]))
-    assert saved[0].content == "content"
-    assert saved[0].metadata_json == {"source": "file.txt"}
-    assert len(saved[0].embedding) == 384
+    document_id = asyncio.run(vector_store.add_documents(
+        [doc], filename="file.txt", content=b"original", page_count=None, extractor="TextLoader"
+    ))
+    stored = saved[0]
+    assert stored.id == document_id and stored.name == "file.txt" and stored.extension == ".txt"
+    assert stored.size_bytes == 8 and stored.page_count is None
+    assert stored.extraction_metadata.extractor == "TextLoader"
+    assert stored.chunks[0].document is stored
+    assert stored.chunks[0].content == "content"
+    assert stored.chunks[0].metadata_json == {"source": "file.txt"}
+    assert len(stored.chunks[0].embedding) == 384
+    assert (tmp_path / f"{document_id}.txt").read_bytes() == b"original"
+    assert stored.storage_path == str((tmp_path / f"{document_id}.txt").resolve())
     Session.model = "other"
     with pytest.raises(ValueError, match="different embedding model"):
-        asyncio.run(vector_store.add_documents([doc]))
+        asyncio.run(vector_store.add_documents(
+            [doc], filename="file.txt", content=b"original", page_count=None, extractor="TextLoader"
+        ))
+    assert len(list(tmp_path.iterdir())) == 1
 
 
 def test_oversized_chunk_is_rejected_before_embedding(monkeypatch):
@@ -179,9 +197,85 @@ def test_oversized_chunk_is_rejected_before_embedding(monkeypatch):
 
     monkeypatch.setattr(vector_store, "get_embeddings", FakeEmbeddings)
     with pytest.raises(EmbeddingInputTooLong, match="257 tokens.*256.*Reduce chunk_size"):
-        asyncio.run(vector_store.add_documents([
-            Document(page_content="oversized", metadata={"source": "file.txt"})
-        ]))
+        asyncio.run(vector_store.add_documents(
+            [Document(page_content="oversized", metadata={"source": "file.txt"})],
+            filename="file.txt", content=b"original", page_count=None, extractor="TextLoader",
+        ))
+
+
+def test_document_and_chunk_schema_has_foreign_keys():
+    dialect = postgresql.dialect()
+    document_sql = str(CreateTable(StoredDocument.__table__).compile(dialect=dialect))
+    metadata_sql = str(CreateTable(DocumentMetadata.__table__).compile(dialect=dialect))
+    chunk_sql = str(CreateTable(Chunk.__table__).compile(dialect=dialect))
+    assert "FOREIGN KEY(collection_name) REFERENCES rag_collection" in document_sql
+    assert "FOREIGN KEY(document_id) REFERENCES rag_document" in metadata_sql
+    assert "FOREIGN KEY(document_id) REFERENCES rag_document" in chunk_sql
+    assert "VECTOR(384)" in chunk_sql and Chunk.__tablename__ == "rag_chunk_v2"
+
+
+def test_database_failure_preserves_existing_and_saved_files(monkeypatch, tmp_path):
+    settings = SimpleNamespace(
+        embeddings_model="model", collection_name="collection", documents_dir=tmp_path
+    )
+    existing = tmp_path / "existing.txt"
+    existing.write_bytes(b"existing data")
+
+    class FakeEmbeddings:
+        _client = SimpleNamespace(
+            max_seq_length=256,
+            tokenizer=SimpleNamespace(encode=lambda text, **kwargs: [0] * 4),
+        )
+
+        async def aembed_documents(self, texts):
+            return [[1.0] + [0.0] * 383 for _ in texts]
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            raise RuntimeError("commit failed")
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        def begin(self):
+            return Transaction()
+
+        async def execute(self, statement):
+            pass
+
+        async def scalar(self, statement):
+            return "model"
+
+        def add(self, document):
+            pass
+
+    monkeypatch.setattr(vector_store, "get_settings", lambda: settings)
+    monkeypatch.setattr(vector_store, "get_embeddings", FakeEmbeddings)
+    monkeypatch.setattr(vector_store, "get_session_factory", lambda: Session)
+    with pytest.raises(RuntimeError, match="commit failed"):
+        asyncio.run(vector_store.add_documents(
+            [Document(page_content="content", metadata={"source": "file.txt"})],
+            filename="file.txt", content=b"original", page_count=None, extractor="TextLoader",
+        ))
+    assert existing.read_bytes() == b"existing data"
+    files = [path for path in tmp_path.iterdir() if path != existing]
+    assert len(files) == 1 and files[0].read_bytes() == b"original"
+
+
+def test_original_file_collision_never_overwrites(tmp_path):
+    document_id = uuid4()
+    existing = tmp_path / f"{document_id}.txt"
+    existing.write_bytes(b"existing data")
+    with pytest.raises(FileExistsError):
+        vector_store.save_original(tmp_path, document_id, ".txt", b"new data")
+    assert existing.read_bytes() == b"existing data"
 
 
 class ToolChatModel(FakeMessagesListChatModel):
@@ -272,7 +366,7 @@ def test_current_time_is_passed_to_agent_prompt(monkeypatch):
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="TEST_DATABASE_URL not set")
-def test_real_postgres_roundtrip(monkeypatch):
+def test_real_postgres_roundtrip(monkeypatch, tmp_path):
     class FakeEmbeddings(Embeddings):
         _client = SimpleNamespace(
             max_seq_length=256,
@@ -288,6 +382,7 @@ def test_real_postgres_roundtrip(monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "database_url", os.environ["TEST_DATABASE_URL"])
     monkeypatch.setattr(settings, "collection_name", f"test_{uuid4().hex}")
+    monkeypatch.setattr(settings, "documents_dir", tmp_path)
     monkeypatch.setattr(vector_store, "get_embeddings", FakeEmbeddings)
     monkeypatch.setattr(retriever, "get_embeddings", FakeEmbeddings)
     monkeypatch.setattr(retriever, "rerank", lambda query, docs: docs)
@@ -296,14 +391,37 @@ def test_real_postgres_roundtrip(monkeypatch):
     async def check():
         await initialize_database()
         try:
-            await vector_store.add_documents([
-                Document(page_content="The sky is blue", metadata={"source": "test.txt"})
-            ])
+            document_id = await vector_store.add_documents(
+                [Document(page_content="The sky is blue", metadata={"source": "test.txt"})],
+                filename="test.txt", content=b"The sky is blue", page_count=None,
+                extractor="TextLoader",
+            )
+            async with get_session_factory()() as session:
+                stored = await session.scalar(
+                    select(StoredDocument)
+                    .options(selectinload(StoredDocument.chunks), selectinload(StoredDocument.extraction_metadata))
+                    .where(StoredDocument.id == document_id)
+                )
+                assert stored is not None
+                assert stored.name == "test.txt" and stored.size_bytes == len(b"The sky is blue")
+                assert stored.extraction_metadata.document_id == document_id
+                assert stored.chunks[0].document_id == document_id
+                assert stored.chunks[0].id is not None
+                assert (tmp_path / f"{document_id}.txt").read_bytes() == b"The sky is blue"
             result = await retriever.search("blue sky")
             assert result[0].page_content == "The sky is blue"
         finally:
             async with get_session_factory()() as session, session.begin():
-                await session.execute(delete(Chunk).where(Chunk.collection_name == settings.collection_name))
+                document_ids = select(StoredDocument.id).where(
+                    StoredDocument.collection_name == settings.collection_name
+                )
+                await session.execute(delete(Chunk).where(Chunk.document_id.in_(document_ids)))
+                await session.execute(
+                    delete(DocumentMetadata).where(DocumentMetadata.document_id.in_(document_ids))
+                )
+                await session.execute(
+                    delete(StoredDocument).where(StoredDocument.collection_name == settings.collection_name)
+                )
                 await session.execute(delete(Collection).where(Collection.name == settings.collection_name))
             await dispose_database()
             get_engine.cache_clear()

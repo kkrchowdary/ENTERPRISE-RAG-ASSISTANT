@@ -1,5 +1,7 @@
 from io import BytesIO
+from uuid import UUID, uuid4
 
+from langchain_core.documents import Document
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -41,8 +43,9 @@ def model_with_search(answer: str = "The sky is blue.") -> ToolChatModel:
 def setup_store(monkeypatch, tmp_path):
     documents = []
 
-    async def add_documents(chunks):
+    async def add_documents(chunks, **kwargs):
         documents.extend(chunks)
+        return uuid4()
 
     async def search(query):
         return documents[:4]
@@ -70,7 +73,10 @@ def test_upload_retrieve_and_chat(monkeypatch, tmp_path):
             "/documents", files={"file": ("notes.txt", b"The sky is blue.", "text/plain")}
         )
         assert upload.status_code == 200
-        assert upload.json() == {"filename": "notes.txt", "chunks": 1}
+        assert upload.json()["filename"] == "notes.txt"
+        assert upload.json()["chunks"] == 1
+        assert UUID(upload.json()["document_id"])
+        assert "path" not in upload.json()
         response = client.post("/chat", json={"question": "What color is the sky?"})
         assert response.status_code == 200
         assert response.json() == {
@@ -108,7 +114,7 @@ def test_invalid_uploads_and_questions(monkeypatch, tmp_path):
 def test_oversized_embedding_input_returns_actionable_error(monkeypatch, tmp_path):
     setup_store(monkeypatch, tmp_path)
 
-    async def reject(chunks):
+    async def reject(chunks, **kwargs):
         raise EmbeddingInputTooLong("Reduce chunk_size in app/rag/chunking.py")
 
     monkeypatch.setattr(pipeline, "add_documents", reject)
@@ -116,6 +122,31 @@ def test_oversized_embedding_input_returns_actionable_error(monkeypatch, tmp_pat
         response = client.post("/documents", files={"file": ("large.txt", b"words")})
     assert response.status_code == 400
     assert "Reduce chunk_size" in response.json()["detail"]
+
+
+def test_pdf_page_count_includes_blank_pages(monkeypatch):
+    class PDFLoader:
+        pass
+
+    class Loader:
+        loaders = {"pdf": PDFLoader}
+
+        def load_file(self, path):
+            return [
+                Document(page_content="first page", metadata={"page": 0}),
+                Document(page_content="", metadata={"page": 1}),
+                Document(page_content="third page", metadata={"page": 2}),
+            ]
+
+    monkeypatch.setattr(pipeline, "LoaderOrchestrator", Loader)
+    monkeypatch.setattr(
+        pipeline, "get_splitter",
+        lambda: RecursiveCharacterTextSplitter(chunk_size=200, chunk_overlap=20),
+    )
+    chunks, pages, extractor = pipeline.load_chunks("document.pdf", b"pdf")
+    assert pages == 3 and extractor == "PDFLoader"
+    assert [chunk.metadata["page"] for chunk in chunks] == [0, 2]
+    assert all(chunk.metadata["source"] == "document.pdf" for chunk in chunks)
 
 
 def test_model_errors_are_not_reported_as_success(monkeypatch, tmp_path):

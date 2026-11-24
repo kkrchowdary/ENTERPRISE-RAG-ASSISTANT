@@ -14,8 +14,9 @@ Use Python 3.12, a local PostgreSQL server with
 [Ollama](https://ollama.com/download). Create a PostgreSQL database named `rag`
 and give the configured database user permission to create the `vector`
 extension and tables. Alternatively, an administrator can create the extension
-first. The application creates its own `rag_collection` and `rag_chunk` tables
-on startup; database failures prevent startup.
+first. The application creates `rag_collection`, `rag_document`,
+`rag_document_metadata`, and `rag_chunk_v2` tables on startup; database
+failures prevent startup.
 
 From `backend`, create a virtual environment, install dependencies, configure
 the database URL, and start the API:
@@ -58,7 +59,8 @@ curl.exe -H "Content-Type: application/json" -d '{"question":"What does the docu
 ```
 
 `POST /documents` accepts one file, up to 10 MiB: PDF, TXT, Markdown, CSV,
-PPTX, XLSX, XLS, or DOCX. It returns the filename and number of indexed chunks.
+PPTX, XLSX, XLS, or DOCX. It returns the document UUID, filename, and number
+of indexed chunks. It does not expose the server's stored-file path.
 `POST /chat` accepts a question and returns an answer and a list of sources.
 `GET /health` checks that the API is running, not that Ollama is available.
 The weather tool sends the requested city to
@@ -82,17 +84,38 @@ intentionally exposed. The agent selects tools first, then a separate model
 call streams the final answer, which adds latency compared with one model call.
 Qwen3 4B supports Ollama streaming and tool calling.
 
-Only extracted chunks are saved in PostgreSQL; uploaded originals are not
-retained. Existing Chroma data is untouched but is not queried or migrated.
-Re-upload original documents to index them in PostgreSQL. Collection metadata
-prevents mixing embedding models; choose a new `COLLECTION_NAME` and re-upload
-when changing models. The database schema requires 384-dimensional embeddings.
-Repeated uploads create additional chunks.
+Uploaded originals are retained under generated UUID filenames in
+`backend/data/documents` by default; `DOCUMENTS_DIR` overrides this location.
+The files contain the original, potentially sensitive content and require
+appropriate filesystem access controls and backups. PostgreSQL stores document
+names, extensions, internal paths, byte sizes, PDF page counts, extractor
+metadata, and chunks linked to their document by foreign keys. Page counts for
+other formats are unknown (`NULL`). Repeated uploads create new documents and
+chunks. A failed or ambiguous database commit can leave an unreferenced original
+file; investigate before manually removing any such file.
+
+Existing Chroma data and the legacy PostgreSQL `rag_chunk` table remain
+untouched but are not queried or migrated. Re-upload original documents to
+index them in the new tables; confirm retrieval before removing any old data.
+Collection metadata prevents mixing embedding models; choose a new
+`COLLECTION_NAME` and re-upload when changing models. The database schema
+requires 384-dimensional embeddings.
 
 Run tests with `python -m pytest -q tests` from `backend`. To include the
 PostgreSQL round-trip test, set `TEST_DATABASE_URL` to a disposable local test
 database with pgvector available. The test creates a uniquely named collection
 and removes its own rows afterward.
+
+## Logs
+
+Application logs are written as JSON lines to the console and
+`backend/logs/app.log`. The file rotates at 5 MiB and retains three older files;
+older entries are overwritten. This local rotation is intended for a single
+server process. Each HTTP response includes an `X-Request-ID` matching its
+request, ingestion, retrieval, tool, and streaming log entries. Logs include
+status, timings, counts, and error types, but not request contents, document
+text, prompts, filenames, credentials, or exception messages. HTTP client and
+server access logs are suppressed in favor of these request summaries.
 
 This local prototype has no authentication or tenant isolation. Do not expose it
 to untrusted users or index sensitive documents without additional safeguards.

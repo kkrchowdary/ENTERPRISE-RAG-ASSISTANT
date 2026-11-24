@@ -178,3 +178,8 @@ pyrightconfig.json
 # Local vector data
 data/chroma_db/*
 !data/chroma_db/.gitkeep
+data/documents/*
+!data/documents/.gitkeep
+
+# Local application logs
+logs/

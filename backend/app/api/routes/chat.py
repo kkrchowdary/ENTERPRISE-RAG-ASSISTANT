@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import time
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -25,22 +26,51 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
 
 async def stream_events(question: str, request: Request):
-    events = graph.astream({"question": question}, stream_mode="custom")
+    start = time.perf_counter()
+    logger.info("stream.started")
+    events = None
     try:
+        events = graph.astream({"question": question}, stream_mode="custom")
         async for event in events:
             if await request.is_disconnected():
+                logger.info("stream.disconnected", extra={
+                    "duration_ms": round((time.perf_counter() - start) * 1000, 2)
+                })
                 return
             yield f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
         if not await request.is_disconnected():
+            logger.info("stream.completed", extra={
+                "duration_ms": round((time.perf_counter() - start) * 1000, 2)
+            })
             yield 'event: done\ndata: {"type":"done"}\n\n'
+        else:
+            logger.info("stream.disconnected", extra={
+                "duration_ms": round((time.perf_counter() - start) * 1000, 2)
+            })
     except asyncio.CancelledError:
+        logger.info("stream.cancelled", extra={
+            "duration_ms": round((time.perf_counter() - start) * 1000, 2)
+        })
         raise
-    except Exception:
-        logger.exception("Chat streaming failed")
+    except GeneratorExit:
+        logger.info("stream.closed", extra={
+            "duration_ms": round((time.perf_counter() - start) * 1000, 2)
+        })
+        raise
+    except Exception as exc:
+        logger.error("stream.failed", extra={
+            "duration_ms": round((time.perf_counter() - start) * 1000, 2),
+            "error_type": type(exc).__name__,
+        })
         if not await request.is_disconnected():
             yield 'event: error\ndata: {"type":"error","message":"Chat failed; check server logs."}\n\n'
     finally:
-        await events.aclose()
+        if events is not None:
+            try:
+                await events.aclose()
+            except Exception as exc:
+                logger.error("stream.cleanup_failed", extra={"error_type": type(exc).__name__})
+                raise
 
 
 @router.post("/chat/stream")
