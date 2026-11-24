@@ -7,6 +7,9 @@ langchain-openai           #connect openai models
 langchain-ollama           #connect local running Ollama models
 langchain-text-splitters   #split documents into smaller chunks
 langchain-postgres
+langchain[mcp]
+langgraph
+
 #LLM PROVIDERS & Tokenization
 openai
 ollama
@@ -30,10 +33,11 @@ langgraph-checkpoint
 pypdf
 pymupdf
 requests
-python-docx
+python-docx>=1.1
 openpyxl
 python-pptx
 pdfplumber
+xlrd
 
 
 #asynchrous & HTTP requests
@@ -51,3 +55,4 @@ fastmcp
 pytest
 pytest-asyncio
 httpx
+xlwt
