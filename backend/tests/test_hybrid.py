@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from datetime import datetime
 from types import SimpleNamespace
@@ -56,15 +57,42 @@ def test_cross_encoder_reranks_candidates(monkeypatch):
     assert reranker.rerank("question", []) == []
 
 
-def test_search_combines_pgvector_and_bm25(monkeypatch):
+def test_retrieval_candidate_and_final_limits(monkeypatch):
+    lexical = [candidate(f"lexical-{i}", f"term value {i}") for i in range(25)]
+    semantic = [candidate(f"semantic-{i}", f"meaning {i}") for i in range(20)]
+    lexical_ranked = retriever.bm25_rank("term", lexical)
+    assert len(lexical_ranked) == 20
+    fused = retriever.fuse(semantic, lexical_ranked)
+    assert len(fused) == 20
+
+    class FakeReranker:
+        def predict(self, pairs):
+            assert len(pairs) == 20
+            return list(range(len(pairs)))
+
+    monkeypatch.setattr(reranker, "get_reranker", lambda: FakeReranker())
+    assert reranker.rerank("term", fused) == list(reversed(fused[-4:]))
+
+
+@pytest.mark.parametrize("reranker_fails", [False, True])
+def test_hybrid_reranking_reaches_generation_with_sources(monkeypatch, reranker_fails):
     settings = SimpleNamespace(embeddings_model="model", collection_name="collection")
-    lexical = (uuid4(), "rare code xy123", {"source": "lexical"})
-    semantic = (uuid4(), "related concept", {"source": "semantic"})
+    lexical = (uuid4(), "rare code xy123", {"source": "lexical.pdf", "page": 2})
+    semantic = (uuid4(), "related concept", {"source": "semantic.txt"})
     statements = []
+    prompts = []
 
     class FakeEmbeddings:
         async def aembed_query(self, query):
+            assert query == "xy123"
             return [1.0] + [0.0] * 383
+
+    class FakeReranker:
+        def predict(self, pairs):
+            assert pairs == [("xy123", "related concept"), ("xy123", "rare code xy123")]
+            if reranker_fails:
+                raise RuntimeError("model unavailable")
+            return [0.1, 0.9]
 
     class Result:
         def __init__(self, rows):
@@ -84,21 +112,54 @@ def test_search_combines_pgvector_and_bm25(monkeypatch):
             return "model"
 
         async def execute(self, statement):
-            sql = str(statement.compile(dialect=postgresql.dialect()))
+            compiled = statement.compile(dialect=postgresql.dialect())
+            sql = str(compiled)
+            if "ORDER BY" in sql:
+                assert 20 in compiled.params.values()
             statements.append(sql)
             return Result([semantic] if "ORDER BY" in sql else [lexical, semantic])
 
+    class CaptureModel(FakeMessagesListChatModel):
+        def bind_tools(self, tool_list, **kwargs):
+            return self
+
+        def _generate(self, messages, *args, **kwargs):
+            prompts.append(messages)
+            return super()._generate(messages, *args, **kwargs)
+
+    model = CaptureModel(responses=[
+        AIMessage(content="", tool_calls=[{
+            "name": "search_documents", "args": {"query": "xy123"},
+            "id": "search-1", "type": "tool_call",
+        }]),
+        AIMessage(content="The code is xy123."),
+        AIMessage(content="The code is xy123."),
+    ])
     monkeypatch.setattr(retriever, "get_settings", lambda: settings)
     monkeypatch.setattr(retriever, "get_embeddings", FakeEmbeddings)
     monkeypatch.setattr(retriever, "get_session_factory", lambda: Session)
-    monkeypatch.setattr(retriever, "rerank", lambda query, docs: docs)
-    result = asyncio.run(retriever.search("xy123"))
-    assert {doc.metadata["source"] for doc in result} == {"lexical", "semantic"}
+    monkeypatch.setattr(reranker, "get_reranker", lambda: FakeReranker())
+    monkeypatch.setattr(graph_module, "get_chat_model", lambda: model)
+    if reranker_fails:
+        with pytest.raises(RuntimeError, match="model unavailable"):
+            asyncio.run(graph_module.answer_question("What is xy123?"))
+        assert len(prompts) == 1
+        return
+    result = asyncio.run(graph_module.answer_question("What is xy123?"))
+    assert result.answer == "The code is xy123."
+    assert [(source.source, source.page) for source in result.sources] == [
+        ("lexical.pdf", 2), ("semantic.txt", None),
+    ]
+    tool_results = json.loads(prompts[-1][-1].text.split("Tool results: ", 1)[1])
+    ranked = json.loads(tool_results[0]["content"])
+    assert [(item["source"], item["page"], item["text"]) for item in ranked] == [
+        ("lexical.pdf", 2, "rare code xy123"),
+        ("semantic.txt", None, "related concept"),
+    ]
     assert "<=>" in statements[1]
     assert "rag_chunk_v2.embedding" not in statements[0]
     assert "JOIN rag_document" in statements[0]
     assert "rag_document.collection_name" in statements[1]
-
 
 def test_reject_collection_with_different_embedding_model(monkeypatch):
     settings = SimpleNamespace(embeddings_model="new", collection_name="existing")

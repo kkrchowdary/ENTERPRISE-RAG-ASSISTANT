@@ -40,6 +40,21 @@ quantized chat model. Qwen thinking is disabled. Speed and quality depend on
 the hardware and documents.
 No MCP server is configured, so the backend does not enable an MCP adapter.
 
+For each document-search tool call, retrieval takes up to 20 pgvector cosine
+neighbors and up to 20 BM25 keyword matches. Reciprocal-rank fusion combines
+them (rank constant 60), keeps at most 20 candidates, and the cross-encoder
+scores each question/chunk pair. The highest-scoring 4 chunks, or fewer if
+fewer are available, are passed to generation with source metadata. Multiple
+tool calls can each contribute up to 4 chunks. There is no relevance-score
+cutoff. These retrieval limits are fixed in the code and independent of model
+sampling; `top_p` is not a retrieval setting.
+
+Set `RERANKER_MODEL` to another compatible Hugging Face cross-encoder if
+needed. The model must be cached locally or downloadable on first use; a
+download or inference failure fails the search instead of silently skipping
+reranking. Ollama generation uses `temperature=0`; this application does not
+set generation `top_k` or `top_p`, so Ollama/model defaults apply.
+
 The current chunk configuration permits 1,000 tokenizer tokens, while MiniLM
 accepts 256 tokens including special tokens. Uploads with oversized chunks are
 rejected before indexing rather than silently truncated. Reduce `chunk_size`
