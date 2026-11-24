@@ -1,11 +1,14 @@
-
+# Requirements for the backend application
+asyncio
+aiohttp
+aiofiles
 fastapi
+openai
 uvicorn[standard]
 pydantic>=2,<3
 pydantic-settings
 python-multipart
 langchain>=1,<2
-langchain-community
 langchain-ollama
 langchain-huggingface>=1.3,<2
 langchain-text-splitters
@@ -19,9 +22,9 @@ rank-bm25
 pdfplumber
 docx2txt
 python-docx>=1.1
-unstructured[md,pptx,xlsx]
+unstructured[all-docs]
 xlrd
 pytest
-pytest-asyncio
+pytest-asyncio>=0.24
 httpx
 xlwt

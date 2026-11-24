@@ -1,27 +1,79 @@
-import json, os
-from pathlib import Path  
-from typing import List, Dict, Type  
-from langchain_core.documents import Document  
-from langchain_community.document_loaders import (  
-    TextLoader,  
-    CSVLoader,  
-    UnstructuredMarkdownLoader,  
-    UnstructuredPowerPointLoader,  
-    UnstructuredExcelLoader,  
-    Docx2txtLoader,  
-)  
-import pdfplumber  
-import xlrd
+import csv
+import json
+from pathlib import Path
 
-  
-  
+import docx2txt
+import pdfplumber
+import xlrd
+from langchain_core.documents import Document
+
+
+class TextLoader:
+    def __init__(self, file_path: str):
+        self.file_path = file_path
+
+    def load(self) -> list[Document]:
+        return [Document(page_content=Path(self.file_path).read_text(),
+                         metadata={"source": self.file_path})]
+
+
+class CSVLoader:
+    def __init__(self, file_path: str):
+        self.file_path = file_path
+
+    def load(self) -> list[Document]:
+        with open(self.file_path, newline="") as file:
+            documents = []
+            for index, row in enumerate(csv.DictReader(file)):
+                fields = []
+                for key, value in row.items():
+                    if isinstance(value, str):
+                        value = value.strip()
+                    elif isinstance(value, list):
+                        value = ",".join(item.strip() for item in value)
+                    fields.append(f"{key.strip() if key is not None else key}: {value}")
+                documents.append(Document(
+                    page_content="\n".join(fields),
+                    metadata={"source": self.file_path, "row": index},
+                ))
+            return documents
+
+
+class DocxLoader:
+    def __init__(self, file_path: str):
+        self.file_path = file_path
+
+    def load(self) -> list[Document]:
+        return [Document(page_content=docx2txt.process(self.file_path),
+                            metadata={"source": self.file_path})]
+
+
+class UnstructuredLocalLoader:
+    def __init__(self, file_path: str):
+        self.file_path = file_path
+
+    def load(self) -> list[Document]:
+        suffix = Path(self.file_path).suffix.lower()
+        if suffix == ".md":
+            from unstructured.partition.md import partition_md
+            elements = partition_md(filename=self.file_path)
+        elif suffix == ".pptx":
+            from unstructured.partition.pptx import partition_pptx
+            elements = partition_pptx(filename=self.file_path)
+        else:
+            from unstructured.partition.xlsx import partition_xlsx
+            elements = partition_xlsx(filename=self.file_path)
+        return [Document(page_content="\n\n".join(str(element) for element in elements),
+                            metadata={"source": self.file_path})]
+
+
 class PDFPlumberLoader:  
     """Custom PDF loader using pdfplumber (mirrors services/file_parsers.py PDFParser)."""  
-  
+    
     def __init__(self, file_path: str):  
         self.file_path = file_path  
-  
-    def load(self) -> List[Document]:  
+    
+    def load(self) -> list[Document]:
         docs = []  
         with pdfplumber.open(self.file_path) as pdf:  
             for i, page in enumerate(pdf.pages):  
@@ -37,7 +89,7 @@ class XLSLoader:
     def __init__(self, file_path: str):
         self.file_path = file_path
 
-    def load(self) -> List[Document]:
+    def load(self) -> list[Document]:
         workbook = xlrd.open_workbook(self.file_path)
         return [
             Document(
@@ -55,29 +107,29 @@ class LoaderOrchestrator:
     """Registry that maps file extensions to LangChain loaders."""  
   
     def __init__(self):  
-        self.loaders: Dict[str, Type] = {  
+        self.loaders: dict[str, type] = {
             "pdf": PDFPlumberLoader,  
             "txt": TextLoader,  
-            "md": UnstructuredMarkdownLoader,  
+            "md": UnstructuredLocalLoader,
             "csv": CSVLoader,  
-            "pptx": UnstructuredPowerPointLoader,  
-            "xlsx": UnstructuredExcelLoader,  
+            "pptx": UnstructuredLocalLoader,
+            "xlsx": UnstructuredLocalLoader,
             "xls": XLSLoader,
-            "docx": Docx2txtLoader,  
+            "docx": DocxLoader,
         }  
   
-    def register(self, extensions: List[str], loader_cls):  
+    def register(self, extensions: list[str], loader_cls: type) -> None:
         for ext in extensions:  
             self.loaders[ext.lower()] = loader_cls  
   
-    def load_file(self, file_path: str) -> List[Document]:  
+    def load_file(self, file_path: str) -> list[Document]:
         ext = Path(file_path).suffix.lstrip(".").lower()  
         loader_cls = self.loaders.get(ext)  
         if not loader_cls:  
             raise ValueError(f"Unsupported file type: {ext}")  
         return loader_cls(file_path).load()  
   
-    def load_directory(self, dir_path: str) -> List[Document]:  
+    def load_directory(self, dir_path: str) -> list[Document]:
         docs = []  
         for path in Path(dir_path).rglob("*"):  
             if path.suffix.lstrip(".").lower() in self.loaders:  

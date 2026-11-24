@@ -175,7 +175,7 @@ def test_legacy_excel_upload(monkeypatch, tmp_path):
 
 
 def test_supported_document_formats(monkeypatch, tmp_path):
-    setup_store(monkeypatch, tmp_path)
+    documents = setup_store(monkeypatch, tmp_path)
     spreadsheet = Workbook()
     spreadsheet.active["A1"] = "spreadsheet text"
     slides = Presentation()
@@ -196,6 +196,15 @@ def test_supported_document_formats(monkeypatch, tmp_path):
             response = client.post("/documents", files={"file": (filename, content)})
             assert response.status_code == 200, (filename, response.text)
             assert response.json()["chunks"] > 0
+    for source, expected in {
+        "notes.md": "Markdown text", "notes.csv": "Alice",
+        "sheet.xlsx": "spreadsheet text", "slides.pptx": "slide text",
+        "word.docx": "word text",
+    }.items():
+        assert any(
+            doc.metadata["source"] == source and expected in doc.page_content
+            for doc in documents
+        )
 
 
 def test_splitter_uses_embedding_tokenizer(monkeypatch):

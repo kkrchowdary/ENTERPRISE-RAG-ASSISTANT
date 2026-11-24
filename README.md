@@ -39,6 +39,9 @@ for reranking; and [`qwen3:4b`](https://ollama.com/library/qwen3:4b), a 2.5 GB
 quantized chat model. Qwen thinking is disabled. Speed and quality depend on
 the hardware and documents.
 No MCP server is configured, so the backend does not enable an MCP adapter.
+Document extraction runs locally using `pdfplumber`, `docx2txt`, `xlrd`,
+Python's text/CSV support, and Unstructured's local format-specific partitioners.
+It does not require the sunset `langchain-community` package.
 
 For each document-search tool call, retrieval takes up to 20 pgvector cosine
 neighbors and up to 20 BM25 keyword matches. Reciprocal-rank fusion combines
