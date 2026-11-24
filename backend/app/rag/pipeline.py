@@ -6,7 +6,7 @@ from langchain_core.documents import Document
 
 from app.rag.chunking import get_splitter
 from app.rag.loaders import LoaderOrchestrator
-from app.rag.vector_store import get_vector_store
+from app.rag.vector_store import add_documents
 
 
 class InvalidDocumentError(ValueError):
@@ -35,6 +35,5 @@ def load_chunks(filename: str, content: bytes) -> list[Document]:
 
 async def ingest(filename: str, content: bytes) -> int:
     chunks = await asyncio.to_thread(load_chunks, filename, content)
-    store = await asyncio.to_thread(get_vector_store)
-    await store.aadd_documents(chunks)
+    await add_documents(chunks)
     return len(chunks)

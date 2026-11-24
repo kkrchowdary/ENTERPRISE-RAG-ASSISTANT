@@ -1,5 +1,6 @@
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
+from app.llm.embeddings import EmbeddingInputTooLong
 from app.rag.pipeline import InvalidDocumentError, ingest
 from app.schemas.document import DocumentResponse
 
@@ -19,6 +20,6 @@ async def upload_document(file: UploadFile = File(...)) -> DocumentResponse:
         raise HTTPException(status_code=400, detail="File is empty")
     try:
         chunks = await ingest(filename, content)
-    except InvalidDocumentError as exc:
+    except (InvalidDocumentError, EmbeddingInputTooLong) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return DocumentResponse(filename=filename, chunks=chunks)

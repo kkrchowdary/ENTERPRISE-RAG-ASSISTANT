@@ -1,30 +1,52 @@
-# Minimal RAG assistant
+# Local hybrid RAG assistant
 
-The backend indexes uploaded documents with LangChain and Chroma. An outer
-LangGraph workflow runs a LangChain agent with a vector-retriever tool. Answers
-use retrieved text and include source filenames and PDF page numbers (zero-based).
-BM25, hybrid search, and reranking are not enabled.
+The backend indexes uploaded documents in local PostgreSQL with pgvector. An
+outer LangGraph workflow runs a LangChain agent with document search, current
+weather, and current time tools. Document search combines pgvector cosine
+similarity with BM25 using reciprocal-rank fusion, then reranks the candidates
+with a local cross-encoder. Answers include source filenames and PDF page
+numbers (zero-based).
 
 ## Setup
 
-Use Python 3.12 and install [Ollama](https://ollama.com/download). From
-`backend`, create a virtual environment, install dependencies, and start the API:
+Use Python 3.12, a local PostgreSQL server with
+[pgvector installed](https://github.com/pgvector/pgvector#installation), and
+[Ollama](https://ollama.com/download). Create a PostgreSQL database named `rag`
+and give the configured database user permission to create the `vector`
+extension and tables. Alternatively, an administrator can create the extension
+first. The application creates its own `rag_collection` and `rag_chunk` tables
+on startup; database failures prevent startup.
+
+From `backend`, create a virtual environment, install dependencies, configure
+the database URL, and start the API:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -r requirements.txt
 Copy-Item .env.example .env
+# Edit .env and set DATABASE_URL to your local PostgreSQL credentials.
 ollama pull qwen3:4b
 .\.venv\Scripts\python -m uvicorn app.main:app --reload
 ```
 
-Ollama must be running. The first upload downloads the embedding model from
-Hugging Face. The defaults are
+Ollama and PostgreSQL must be running. The first upload downloads the embedding
+model and the first search downloads the reranker from Hugging Face. Defaults:
 [`sentence-transformers/all-MiniLM-L6-v2`](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2),
-a small English model producing 384-dimensional vectors, and
-[`qwen3:4b`](https://ollama.com/library/qwen3:4b), a 2.5 GB quantized chat model.
-Qwen thinking is disabled for shorter responses. Actual speed and answer quality
-depend on the hardware and documents.
+a small English model producing 384-dimensional vectors;
+[`cross-encoder/ms-marco-MiniLM-L6-v2`](https://huggingface.co/cross-encoder/ms-marco-MiniLM-L6-v2)
+for reranking; and [`qwen3:4b`](https://ollama.com/library/qwen3:4b), a 2.5 GB
+quantized chat model. Qwen thinking is disabled. Speed and quality depend on
+the hardware and documents.
+No MCP server is configured, so the backend does not enable an MCP adapter.
+
+The current chunk configuration permits 1,000 tokenizer tokens, while MiniLM
+accepts 256 tokens including special tokens. Uploads with oversized chunks are
+rejected before indexing rather than silently truncated. Reduce `chunk_size`
+in `backend/app/rag/chunking.py` (for example, to 200), ensure `chunk_overlap`
+is smaller than the new chunk size, and re-upload the document.
+BM25 currently reads and scores all chunks in the collection per search, and
+pgvector uses exact search without an approximate index. This favors simplicity
+over large-corpus performance.
 
 ## API
 
@@ -39,13 +61,38 @@ curl.exe -H "Content-Type: application/json" -d '{"question":"What does the docu
 PPTX, XLSX, XLS, or DOCX. It returns the filename and number of indexed chunks.
 `POST /chat` accepts a question and returns an answer and a list of sources.
 `GET /health` checks that the API is running, not that Ollama is available.
+The weather tool sends the requested city to
+[Open-Meteo](https://open-meteo.com/en/terms) and requires internet access.
+Check its usage terms before commercial use. The time tool uses the server's
+local timezone.
 
-Only extracted chunks are saved in Chroma; uploaded originals are not retained.
-The default `rag_minilm_v1` collection is separate from other collections, so
-existing data is not deleted. Re-upload documents to index them in this
-collection. If you change the embedding model, choose a new `COLLECTION_NAME`
-and re-upload documents: embeddings from different models are not compatible.
+`POST /chat/stream` accepts the same JSON as `/chat` and returns Server-Sent
+Events (`text/event-stream`). Each event's JSON includes a `type`:
+`tool_start` and `tool_end` include the tool name, `sources` includes the
+source list, `token` contains answer text, and `done` marks completion. Errors
+produce an `error` event instead of `done`; once streaming starts the HTTP
+status remains 200. Client disconnects cancel the workflow.
+
+```powershell
+curl.exe -N -H "Content-Type: application/json" -d '{"question":"What time is it?"}' http://localhost:8000/chat/stream
+```
+
+Only tool activity is streamed as agent progress; private reasoning is not
+intentionally exposed. The agent selects tools first, then a separate model
+call streams the final answer, which adds latency compared with one model call.
+Qwen3 4B supports Ollama streaming and tool calling.
+
+Only extracted chunks are saved in PostgreSQL; uploaded originals are not
+retained. Existing Chroma data is untouched but is not queried or migrated.
+Re-upload original documents to index them in PostgreSQL. Collection metadata
+prevents mixing embedding models; choose a new `COLLECTION_NAME` and re-upload
+when changing models. The database schema requires 384-dimensional embeddings.
 Repeated uploads create additional chunks.
+
+Run tests with `python -m pytest -q tests` from `backend`. To include the
+PostgreSQL round-trip test, set `TEST_DATABASE_URL` to a disposable local test
+database with pgvector available. The test creates a uniquely named collection
+and removes its own rows afterward.
 
 This local prototype has no authentication or tenant isolation. Do not expose it
 to untrusted users or index sensitive documents without additional safeguards.

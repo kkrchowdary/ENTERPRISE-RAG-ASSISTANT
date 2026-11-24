@@ -10,6 +10,6 @@ from app.core.config import get_settings
 def get_splitter() -> RecursiveCharacterTextSplitter:
     return RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
         AutoTokenizer.from_pretrained(get_settings().embeddings_model),
-        chunk_size=200,
-        chunk_overlap=30,
+        chunk_size=1000,
+        chunk_overlap=200,
     )

@@ -1,6 +1,4 @@
 from functools import lru_cache
-from pathlib import Path
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,8 +8,9 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_chat_model: str = "qwen3:4b"
     embeddings_model: str = "sentence-transformers/all-MiniLM-L6-v2"
-    chroma_dir: Path = Path("data/chroma_db")
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/rag"
     collection_name: str = "rag_minilm_v1"
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L6-v2"
 
 
 @lru_cache

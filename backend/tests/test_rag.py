@@ -1,7 +1,5 @@
 from io import BytesIO
 
-from langchain_chroma import Chroma
-from langchain_core.embeddings import Embeddings
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -14,17 +12,12 @@ from transformers import PreTrainedTokenizerFast
 import xlwt
 
 import app.agents.graph as graph_module
+import app.agents.tools as tools
+import app.main as main_module
 import app.rag.chunking as chunking
 import app.rag.pipeline as pipeline
+from app.llm.embeddings import EmbeddingInputTooLong
 from app.main import app
-
-
-class TestEmbeddings(Embeddings):
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return [[1.0, 0.0] for _ in texts]
-
-    def embed_query(self, text: str) -> list[float]:
-        return [1.0, 0.0]
 
 
 class ToolChatModel(FakeMessagesListChatModel):
@@ -41,26 +34,36 @@ def model_with_search(answer: str = "The sky is blue.") -> ToolChatModel:
             "type": "tool_call",
         }]),
         AIMessage(content=answer),
+        AIMessage(content=answer),
     ])
 
 
 def setup_store(monkeypatch, tmp_path):
-    store = Chroma(
-        collection_name="test_rag",
-        persist_directory=str(tmp_path),
-        embedding_function=TestEmbeddings(),
-    )
-    monkeypatch.setattr(pipeline, "get_vector_store", lambda: store)
+    documents = []
+
+    async def add_documents(chunks):
+        documents.extend(chunks)
+
+    async def search(query):
+        return documents[:4]
+
+    async def no_database():
+        pass
+
+    monkeypatch.setattr(pipeline, "add_documents", add_documents)
     monkeypatch.setattr(
         pipeline, "get_splitter",
         lambda: RecursiveCharacterTextSplitter(chunk_size=200, chunk_overlap=20),
     )
-    monkeypatch.setattr(graph_module, "get_vector_store", lambda: store)
-    monkeypatch.setattr(graph_module, "get_chat_model", model_with_search)
-    return store
+    monkeypatch.setattr(tools, "search", search)
+    monkeypatch.setattr(main_module, "initialize_database", no_database)
+    monkeypatch.setattr(main_module, "dispose_database", no_database)
+    model = model_with_search()
+    monkeypatch.setattr(graph_module, "get_chat_model", lambda: model)
+    return documents
 
 
-def test_upload_retrieve_chat_and_persistence(monkeypatch, tmp_path):
+def test_upload_retrieve_and_chat(monkeypatch, tmp_path):
     setup_store(monkeypatch, tmp_path)
     with TestClient(app) as client:
         upload = client.post(
@@ -74,12 +77,6 @@ def test_upload_retrieve_chat_and_persistence(monkeypatch, tmp_path):
             "answer": "The sky is blue.",
             "sources": [{"source": "notes.txt", "page": None}],
         }
-    reopened = Chroma(
-        collection_name="test_rag",
-        persist_directory=str(tmp_path),
-        embedding_function=TestEmbeddings(),
-    )
-    assert reopened.similarity_search("sky")[0].page_content == "The sky is blue."
 
 
 def test_empty_store_and_missing_tool_call(monkeypatch, tmp_path):
@@ -106,6 +103,19 @@ def test_invalid_uploads_and_questions(monkeypatch, tmp_path):
         ).status_code == 413
         assert client.post("/chat", json={"question": "   "}).status_code == 400
         assert client.post("/chat", json={"question": ""}).status_code == 422
+
+
+def test_oversized_embedding_input_returns_actionable_error(monkeypatch, tmp_path):
+    setup_store(monkeypatch, tmp_path)
+
+    async def reject(chunks):
+        raise EmbeddingInputTooLong("Reduce chunk_size in app/rag/chunking.py")
+
+    monkeypatch.setattr(pipeline, "add_documents", reject)
+    with TestClient(app) as client:
+        response = client.post("/documents", files={"file": ("large.txt", b"words")})
+    assert response.status_code == 400
+    assert "Reduce chunk_size" in response.json()["detail"]
 
 
 def test_model_errors_are_not_reported_as_success(monkeypatch, tmp_path):
@@ -164,8 +174,8 @@ def test_splitter_uses_embedding_tokenizer(monkeypatch):
     monkeypatch.setattr(chunking.AutoTokenizer, "from_pretrained", lambda name: tokenizer)
     chunking.get_splitter.cache_clear()
     try:
-        chunks = chunking.get_splitter().split_text(" ".join(["word"] * 300))
+        chunks = chunking.get_splitter().split_text(" ".join(["word"] * 1500))
         assert len(chunks) > 1
-        assert all(len(tokenizer.tokenize(chunk)) <= 200 for chunk in chunks)
+        assert all(len(tokenizer.tokenize(chunk)) <= 1000 for chunk in chunks)
     finally:
         chunking.get_splitter.cache_clear()
