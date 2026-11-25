@@ -12,4 +12,5 @@ def get_splitter() -> RecursiveCharacterTextSplitter:
         AutoTokenizer.from_pretrained(get_settings().embeddings_model),
         chunk_size=1000,
         chunk_overlap=200,
+        length_function=len,
     )

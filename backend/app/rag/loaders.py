@@ -151,14 +151,11 @@ class RecursiveDirectoryLoader(BaseLoader):
 if __name__ == "__main__":
     import sys
     from uuid import uuid4
-
-    from dotenv import load_dotenv
-
+    
     backend_dir = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(backend_dir))
     from app.core.config import Settings
 
-    load_dotenv(override=False)
     folder_path = Settings().documents_dir
     if not folder_path.is_absolute():
         folder_path = backend_dir / folder_path
