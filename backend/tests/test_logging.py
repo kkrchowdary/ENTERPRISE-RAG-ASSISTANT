@@ -81,11 +81,15 @@ def test_ingestion_logs_counts_without_filename_or_content(monkeypatch, logs):
     no_database(monkeypatch)
     secret = "PRIVATE_DOCUMENT_CONTENT"
 
-    async def save(chunks, **kwargs):
+    async def embed(chunks):
+        return [[0.0] * 384 for chunk in chunks]
+
+    async def save(chunks, vectors, **kwargs):
         assert chunks[0].page_content == secret
         return uuid4()
 
-    monkeypatch.setattr(pipeline, "add_documents", save)
+    monkeypatch.setattr(pipeline, "embed_documents", embed)
+    monkeypatch.setattr(pipeline, "store_documents", save)
     monkeypatch.setattr(
         pipeline, "get_splitter",
         lambda: RecursiveCharacterTextSplitter(chunk_size=200, chunk_overlap=20),
@@ -98,7 +102,7 @@ def test_ingestion_logs_counts_without_filename_or_content(monkeypatch, logs):
     assert response.status_code == 200
     events = [entry for entry in logs if entry.get("request_id") == request_id]
     assert {entry["event"] for entry in events} >= {
-        "upload.received", "ingestion.started", "ingestion.load_and_split.completed",
+        "upload.received", "ingestion.started", "ingestion.load.completed", "ingestion.split.completed",
         "ingestion.chunks", "ingestion.completed", "request.completed",
     }
     assert next(item for item in events if item["event"] == "ingestion.chunks")["chunk_count"] == 1

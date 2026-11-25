@@ -18,7 +18,9 @@ async def search_documents(query: str) -> tuple[str, list[Document]]:
         documents = await search(query)
         content = json.dumps([
             {"source": doc.metadata.get("source"), "page": doc.metadata.get("page"),
-            "text": doc.page_content}
+             "text": doc.page_content,
+             **{key: doc.metadata[key] for key in ("document_id", "chunk_id", "chunk_index")
+                if key in doc.metadata}}
             for doc in documents
         ], ensure_ascii=False)
         return content, documents

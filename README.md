@@ -14,9 +14,11 @@ Use Python 3.12, a local PostgreSQL server with
 [Ollama](https://ollama.com/download). Create a PostgreSQL database named `rag`
 and give the configured database user permission to create the `vector`
 extension and tables. Alternatively, an administrator can create the extension
-first. The application creates `rag_collection`, `rag_document`,
+first. The application creates `rag_collection`, `rag_folder`, `rag_document`,
 `rag_document_metadata`, and `rag_chunk_v2` tables on startup; database
-failures prevent startup.
+failures prevent startup. If pgvector is unavailable, install it on the server.
+If the application user cannot enable it, an administrator must run
+`CREATE EXTENSION vector` in the database.
 
 From `backend`, create a virtual environment, install dependencies, configure
 the database URL, and start the API:
@@ -123,12 +125,34 @@ other formats are unknown (`NULL`). Repeated uploads create new documents and
 chunks. A failed or ambiguous database commit can leave an unreferenced original
 file; investigate before manually removing any such file.
 
+Uploads run an ingestion LangGraph subgraph: load, split, embed, and store.
+The folder record identifies the local original-file storage directory, not a
+user-selected logical folder. Each new document stores the element-wise
+arithmetic mean of its chunk embeddings (not normalized); retrieval continues
+to rank chunk embeddings. Document metadata records the extractor, file details,
+embedding model and SHA-256 file hash. Each chunk stores its index, text type,
+SHA-256 text hash, vector and JSONB source metadata, including document and
+chunk IDs. Loader-provided metadata is preserved. Hashes identify content but
+do not deduplicate uploads. Deleting a document row cascades to its metadata
+and chunks, but does not delete the original file.
+
+Startup performs an additive PostgreSQL schema upgrade and changes existing
+document foreign keys to cascade; it requires permission to alter these tables.
+Existing rows and vectors remain searchable. Newly added fields on old records
+are `NULL` until documents are re-uploaded; the upgrade does not fabricate
+missing embeddings or provenance. Back up the database before upgrading.
+
 Existing Chroma data and the legacy PostgreSQL `rag_chunk` table remain
 untouched but are not queried or migrated. Re-upload original documents to
 index them in the new tables; confirm retrieval before removing any old data.
 Collection metadata prevents mixing embedding models; choose a new
 `COLLECTION_NAME` and re-upload when changing models. The database schema
 requires 384-dimensional embeddings.
+
+The design follows [LangChain's document and retrieval guidance](https://docs.langchain.com/oss/python/langchain/knowledge-base)
+and [LangGraph's graph workflow model](https://docs.langchain.com/oss/python/langgraph/overview).
+Salesforce's [Enterprise Deep Research](https://github.com/SalesforceAIResearch/enterprise-deep-research)
+is a research-agent architecture, not a source for this database schema.
 
 Run tests with `python -m pytest -q tests` from `backend`. To include the
 PostgreSQL round-trip test, set `TEST_DATABASE_URL` to a disposable local test

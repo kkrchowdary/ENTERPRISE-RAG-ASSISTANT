@@ -1,3 +1,4 @@
+import asyncio
 from io import BytesIO
 from uuid import UUID, uuid4
 
@@ -43,7 +44,10 @@ def model_with_search(answer: str = "The sky is blue.") -> ToolChatModel:
 def setup_store(monkeypatch, tmp_path):
     documents = []
 
-    async def add_documents(chunks, **kwargs):
+    async def embed_documents(chunks):
+        return [[0.0] * 384 for chunk in chunks]
+
+    async def store_documents(chunks, vectors, **kwargs):
         documents.extend(chunks)
         return uuid4()
 
@@ -53,7 +57,8 @@ def setup_store(monkeypatch, tmp_path):
     async def no_database():
         pass
 
-    monkeypatch.setattr(pipeline, "add_documents", add_documents)
+    monkeypatch.setattr(pipeline, "embed_documents", embed_documents)
+    monkeypatch.setattr(pipeline, "store_documents", store_documents)
     monkeypatch.setattr(
         pipeline, "get_splitter",
         lambda: RecursiveCharacterTextSplitter(chunk_size=200, chunk_overlap=20),
@@ -114,10 +119,10 @@ def test_invalid_uploads_and_questions(monkeypatch, tmp_path):
 def test_oversized_embedding_input_returns_actionable_error(monkeypatch, tmp_path):
     setup_store(monkeypatch, tmp_path)
 
-    async def reject(chunks, **kwargs):
+    async def reject(chunks):
         raise EmbeddingInputTooLong("Reduce chunk_size in app/rag/chunking.py")
 
-    monkeypatch.setattr(pipeline, "add_documents", reject)
+    monkeypatch.setattr(pipeline, "embed_documents", reject)
     with TestClient(app) as client:
         response = client.post("/documents", files={"file": ("large.txt", b"words")})
     assert response.status_code == 400
@@ -133,7 +138,7 @@ def test_pdf_page_count_includes_blank_pages(monkeypatch):
 
         def load_file(self, path):
             return [
-                Document(page_content="first page", metadata={"page": 0}),
+                Document(page_content="first page", metadata={"page": 0, "section": "introduction"}),
                 Document(page_content="", metadata={"page": 1}),
                 Document(page_content="third page", metadata={"page": 2}),
             ]
@@ -146,7 +151,40 @@ def test_pdf_page_count_includes_blank_pages(monkeypatch):
     chunks, pages, extractor = pipeline.load_chunks("document.pdf", b"pdf")
     assert pages == 3 and extractor == "PDFLoader"
     assert [chunk.metadata["page"] for chunk in chunks] == [0, 2]
+    assert chunks[0].metadata["section"] == "introduction"
     assert all(chunk.metadata["source"] == "document.pdf" for chunk in chunks)
+
+
+def test_ingestion_graph_runs_stages_in_order(monkeypatch):
+    calls = []
+    document_id = uuid4()
+
+    def load(filename, content):
+        calls.append("load")
+        return [Document(page_content="content", metadata={"source": filename})], None, "test"
+
+    def split(documents):
+        calls.append("split")
+        return documents
+
+    async def embed(documents):
+        calls.append("embed")
+        return [[1.0] * 384]
+
+    async def store(documents, vectors, **kwargs):
+        calls.append("store")
+        assert vectors == [[1.0] * 384]
+        return document_id
+
+    monkeypatch.setattr(pipeline, "load_source", load)
+    monkeypatch.setattr(pipeline, "split_source", split)
+    monkeypatch.setattr(pipeline, "embed_documents", embed)
+    monkeypatch.setattr(pipeline, "store_documents", store)
+    assert asyncio.run(pipeline.ingest("doc.txt", b"content")) == (document_id, 1)
+    assert calls == ["load", "split", "embed", "store"]
+    edges = {(edge.source, edge.target) for edge in pipeline.ingestion_graph.get_graph().edges}
+    assert {("__start__", "load"), ("load", "split"), ("split", "embed"),
+            ("embed", "store"), ("store", "__end__")} <= edges
 
 
 def test_model_errors_are_not_reported_as_success(monkeypatch, tmp_path):

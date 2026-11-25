@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 from datetime import datetime
@@ -25,7 +26,7 @@ import app.rag.retriever as retriever
 import app.rag.vector_store as vector_store
 from app.core.config import get_settings
 from app.database.connection import dispose_database, get_engine, get_session_factory, initialize_database
-from app.database.models import Chunk, Collection, DocumentMetadata, StoredDocument
+from app.database.models import Chunk, Collection, DocumentMetadata, Folder, StoredDocument
 from app.llm.embeddings import EmbeddingInputTooLong
 from app.main import app
 
@@ -77,7 +78,11 @@ def test_retrieval_candidate_and_final_limits(monkeypatch):
 @pytest.mark.parametrize("reranker_fails", [False, True])
 def test_hybrid_reranking_reaches_generation_with_sources(monkeypatch, reranker_fails):
     settings = SimpleNamespace(embeddings_model="model", collection_name="collection")
-    lexical = (uuid4(), "rare code xy123", {"source": "lexical.pdf", "page": 2})
+    lexical_id, document_id = uuid4(), uuid4()
+    lexical = (lexical_id, "rare code xy123", {
+        "source": "lexical.pdf", "page": 2, "chunk_id": str(lexical_id),
+        "document_id": str(document_id), "chunk_index": 1,
+    })
     semantic = (uuid4(), "related concept", {"source": "semantic.txt"})
     statements = []
     prompts = []
@@ -156,6 +161,9 @@ def test_hybrid_reranking_reaches_generation_with_sources(monkeypatch, reranker_
         ("lexical.pdf", 2, "rare code xy123"),
         ("semantic.txt", None, "related concept"),
     ]
+    assert ranked[0]["chunk_id"] == str(lexical_id)
+    assert ranked[0]["document_id"] == str(document_id)
+    assert ranked[0]["chunk_index"] == 1
     assert "<=>" in statements[1]
     assert "rag_chunk_v2.embedding" not in statements[0]
     assert "JOIN rag_document" in statements[0]
@@ -198,7 +206,7 @@ def test_ingestion_stores_vectors_and_checks_collection_model(monkeypatch, tmp_p
         )
 
         async def aembed_documents(self, texts):
-            return [[1.0] + [0.0] * 383 for _ in texts]
+            return [[float(index + 1)] + [0.0] * 383 for index, _ in enumerate(texts)]
 
     class Session:
         model = "model"
@@ -224,17 +232,33 @@ def test_ingestion_stores_vectors_and_checks_collection_model(monkeypatch, tmp_p
     monkeypatch.setattr(vector_store, "get_settings", lambda: settings)
     monkeypatch.setattr(vector_store, "get_embeddings", FakeEmbeddings)
     monkeypatch.setattr(vector_store, "get_session_factory", lambda: Session)
-    doc = Document(page_content="content", metadata={"source": "file.txt"})
+    doc = Document(page_content="content", metadata={"source": "file.txt", "row": 0})
+    second = Document(page_content="other", metadata={"source": "file.txt", "row": 1})
     document_id = asyncio.run(vector_store.add_documents(
-        [doc], filename="file.txt", content=b"original", page_count=None, extractor="TextLoader"
+        [doc, second], filename="file.txt", content=b"original", page_count=None,
+        extractor="TextLoader"
     ))
     stored = saved[0]
     assert stored.id == document_id and stored.name == "file.txt" and stored.extension == ".txt"
     assert stored.size_bytes == 8 and stored.page_count is None
     assert stored.extraction_metadata.extractor == "TextLoader"
+    assert stored.extraction_metadata.metadata_json == {
+        "content_hash": hashlib.sha256(b"original").hexdigest(),
+        "embedding_model": "model", "chunk_count": 2,
+        "name": "file.txt", "extension": ".txt", "size_bytes": 8, "page_count": None,
+        "extractor": "TextLoader",
+    }
+    assert stored.folder_id and stored.embedding == [1.5] + [0.0] * 383
     assert stored.chunks[0].document is stored
     assert stored.chunks[0].content == "content"
-    assert stored.chunks[0].metadata_json == {"source": "file.txt"}
+    assert stored.chunks[0].metadata_json == {
+        "source": "file.txt", "row": 0, "document_id": str(document_id),
+        "chunk_id": str(stored.chunks[0].id), "chunk_index": 0, "chunk_type": "text",
+        "content_hash": hashlib.sha256(b"content").hexdigest(),
+    }
+    assert stored.chunks[0].content_hash == hashlib.sha256(b"content").hexdigest()
+    assert [chunk.chunk_index for chunk in stored.chunks] == [0, 1]
+    assert all(chunk.chunk_type == "text" for chunk in stored.chunks)
     assert len(stored.chunks[0].embedding) == 384
     assert (tmp_path / f"{document_id}.txt").read_bytes() == b"original"
     assert stored.storage_path == str((tmp_path / f"{document_id}.txt").resolve())
@@ -244,6 +268,14 @@ def test_ingestion_stores_vectors_and_checks_collection_model(monkeypatch, tmp_p
             [doc], filename="file.txt", content=b"original", page_count=None, extractor="TextLoader"
         ))
     assert len(list(tmp_path.iterdir())) == 1
+
+
+def test_empty_document_fails_before_embedding(monkeypatch):
+    monkeypatch.setattr(vector_store, "get_embeddings", lambda: pytest.fail("must not embed"))
+    with pytest.raises(ValueError, match="at least one extractable chunk"):
+        asyncio.run(vector_store.add_documents(
+            [], filename="empty.txt", content=b"", page_count=None, extractor="TextLoader",
+        ))
 
 
 def test_oversized_chunk_is_rejected_before_embedding(monkeypatch):
@@ -270,9 +302,14 @@ def test_document_and_chunk_schema_has_foreign_keys():
     metadata_sql = str(CreateTable(DocumentMetadata.__table__).compile(dialect=dialect))
     chunk_sql = str(CreateTable(Chunk.__table__).compile(dialect=dialect))
     assert "FOREIGN KEY(collection_name) REFERENCES rag_collection" in document_sql
+    assert "FOREIGN KEY(folder_id) REFERENCES rag_folder" in document_sql
+    assert "VECTOR(384)" in document_sql
     assert "FOREIGN KEY(document_id) REFERENCES rag_document" in metadata_sql
     assert "FOREIGN KEY(document_id) REFERENCES rag_document" in chunk_sql
+    assert "ON DELETE CASCADE" in metadata_sql and "ON DELETE CASCADE" in chunk_sql
     assert "VECTOR(384)" in chunk_sql and Chunk.__tablename__ == "rag_chunk_v2"
+    assert "chunk_index INTEGER" in chunk_sql and "content_hash VARCHAR(64)" in chunk_sql
+    assert "metadata_json JSONB" in metadata_sql
 
 
 def test_database_failure_preserves_existing_and_saved_files(monkeypatch, tmp_path):
@@ -468,9 +505,24 @@ def test_real_postgres_roundtrip(monkeypatch, tmp_path):
                 assert stored.extraction_metadata.document_id == document_id
                 assert stored.chunks[0].document_id == document_id
                 assert stored.chunks[0].id is not None
+                assert stored.folder_id and list(stored.embedding) == [1.0] + [0.0] * 383
+                assert stored.extraction_metadata.metadata_json["chunk_count"] == 1
+                assert stored.chunks[0].chunk_index == 0
+                assert stored.chunks[0].content_hash == hashlib.sha256(b"The sky is blue").hexdigest()
                 assert (tmp_path / f"{document_id}.txt").read_bytes() == b"The sky is blue"
             result = await retriever.search("blue sky")
             assert result[0].page_content == "The sky is blue"
+            assert result[0].metadata["document_id"] == str(document_id)
+            async with get_session_factory()() as session, session.begin():
+                await session.execute(delete(StoredDocument).where(StoredDocument.id == document_id))
+                assert await session.scalar(
+                    select(Chunk.id).where(Chunk.document_id == document_id)
+                ) is None
+                assert await session.scalar(
+                    select(DocumentMetadata.document_id).where(
+                        DocumentMetadata.document_id == document_id
+                    )
+                ) is None
         finally:
             async with get_session_factory()() as session, session.begin():
                 document_ids = select(StoredDocument.id).where(
@@ -483,6 +535,7 @@ def test_real_postgres_roundtrip(monkeypatch, tmp_path):
                 await session.execute(
                     delete(StoredDocument).where(StoredDocument.collection_name == settings.collection_name)
                 )
+                await session.execute(delete(Folder).where(Folder.path == str(tmp_path.resolve())))
                 await session.execute(delete(Collection).where(Collection.name == settings.collection_name))
             await dispose_database()
             get_engine.cache_clear()
